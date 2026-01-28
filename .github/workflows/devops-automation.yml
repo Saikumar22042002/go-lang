@@ -1,0 +1,70 @@
+name: Go CI/CD Pipeline for Dev
+
+on:
+  push:
+    branches:
+      - v1
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/go-lang
+          tags: |
+            type=sha,prefix=v1-
+            type=raw,value=latest,enable=${{ endsWith(github.ref, 'v1') }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG_DATA }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+
+      - name: Update Kubernetes deployment image
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/go-lang:${{ needs.build-and-push.outputs.image_tag }}"
+          sed -i "s|image: .*|image: $IMAGE_NAME|g" deployment.yaml
+          echo "Updated deployment.yaml to use image: $IMAGE_NAME"
+          cat deployment.yaml
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f deployment.yaml
+          kubectl apply -f service.yaml
+
+      - name: Verify deployment rollout
+        run: kubectl rollout status deployment/go-lang-deployment --timeout=120s
